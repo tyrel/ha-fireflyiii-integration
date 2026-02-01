@@ -513,21 +513,28 @@ class Fireflyiii:
 
     async def piggy_banks(self, ids=None) -> FireflyiiiObjectBaseList:
         """Get FireflyIII Piggy Banks"""
-
         _LOGGER.debug("Updating FireflyIII piggy banks")
-
         piggy_bank_list = FireflyiiiObjectBaseList(
             type=FireflyiiiObjectType.PIGGY_BANKS
         )
+        if ids:
+            piggy_banks = {"data": []}
+            for piggy_bank_id in ids:
+                piggy_bank = await self._request_api(
+                    "GET", f"/piggy-banks/{piggy_bank_id}"
+                )
+                if "data" in piggy_bank:
+                    piggy_banks["data"].append(piggy_bank["data"])
+        else:
+            params: dict = {}
+            self._set_max_limit(params)
+            piggy_banks = await self._request_api("GET", "/piggy-banks", params)
 
-        params: dict = {}
-        self._set_max_limit(params)
+        _LOGGER.debug(f"Piggy banks raw response: {piggy_banks}")
 
-        piggy_banks = await self._request_api("GET", "/piggy-banks", params)
-        if not "data" in piggy_banks:
+        if "data" not in piggy_banks:
             _LOGGER.error(
-                "Invalid response from server on piggy banks, "
-                + "expected JSON data response: '%s'",
+                "Invalid response from server on piggy banks, expected JSON data response: '%s'",
                 piggy_banks,
             )
             return piggy_bank_list
@@ -537,40 +544,60 @@ class Fireflyiii:
             if piggy_bank_id == 0:
                 continue
 
-            if ids and piggy_bank_id not in ids:
-                continue
-
             attributes = piggy_bank.get("attributes")
             if not attributes:
                 continue
 
-            account_id = attributes.get("account_id", None)
-            if not account_id:
-                continue
+            # Create a combined piggy bank
+            total_current_amount = sum(float(a.get("current_amount", 0)) for a in attributes.get("accounts", []))
+            first_account_id = attributes.get("accounts", [])[0].get("account_id")
+            if first_account_id:
+                piggy_account_list = await self.accounts(ids=[first_account_id])
+                if piggy_account_list:
+                    piggy_account = piggy_account_list.get(first_account_id, None)
+                    if isinstance(piggy_account, FireflyiiiAccount):
+                        combined_piggy_bank_obj = FireflyiiiPiggyBank(
+                            id=f"{attributes.get('id', piggy_bank_id)}-combined",
+                            name=f"{attributes.get('name', '')} (Combined)",
+                            account=piggy_account,
+                            target_amount=attributes.get("target_amount", 0),
+                            percentage=attributes.get("percentage", 0),
+                            current_amount=total_current_amount,
+                            left_to_save=attributes.get("left_to_save", 0),
+                            currency=None,  # Get from account
+                        )
+                        piggy_bank_list.update(combined_piggy_bank_obj)
 
-            piggy_account_list = await self.accounts(ids=[account_id])
-            if not piggy_account_list:
-                continue
+            # Create individual piggy banks for each account
+            for account in attributes.get("accounts", []):
+                account_id = account.get("account_id")
+                if not account_id:
+                    continue
 
-            account_id = next(iter(piggy_account_list))
-            piggy_account = piggy_account_list.get(account_id, None)
+                piggy_account_list = await self.accounts(ids=[account_id])
+                if not piggy_account_list:
+                    _LOGGER.debug(f"Piggy account list for account {account_id} is empty")
+                    continue
 
-            if not isinstance(piggy_account, FireflyiiiAccount):
-                continue
+                account_id = next(iter(piggy_account_list))
+                piggy_account = piggy_account_list.get(account_id, None)
+                if not isinstance(piggy_account, FireflyiiiAccount):
+                    _LOGGER.debug(f"Piggy account for account {account_id} is not a FireflyiiiAccount instance")
+                    continue
 
-            piggy_bank_obj = FireflyiiiPiggyBank(
-                id=attributes.get("id", piggy_bank_id),
-                name=attributes.get("name", ""),
-                account=piggy_account,
-                target_amount=attributes.get("target_amount", 0),
-                percentage=attributes.get("percentage", 0),
-                current_amount=attributes.get("current_amount", 0),
-                left_to_save=attributes.get("left_to_save", 0),
-                currency=None,  # Get from account
-            )
+                piggy_bank_obj = FireflyiiiPiggyBank(
+                    id=f"{attributes.get('id', piggy_bank_id)}-{account_id}",
+                    name=f"{attributes.get('name', '')} ({piggy_account.name})",
+                    account=piggy_account,
+                    target_amount=attributes.get("target_amount", 0),
+                    percentage=attributes.get("percentage", 0),
+                    current_amount=account.get("current_amount", 0),
+                    left_to_save=attributes.get("left_to_save", 0),
+                    currency=None,  # Get from account
+                )
+                piggy_bank_list.update(piggy_bank_obj)
 
-            piggy_bank_list.update(piggy_bank_obj)
-
+        _LOGGER.debug(f"Returning piggy banks: {str(piggy_bank_list)}")
         return piggy_bank_list
 
     async def budgets(self, ids=None, currency=None) -> FireflyiiiObjectBaseList:
